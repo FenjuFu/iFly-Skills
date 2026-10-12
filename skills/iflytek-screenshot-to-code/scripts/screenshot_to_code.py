@@ -196,7 +196,11 @@ def request_payload(
     }
 
 
-def _safe_api_error(body: bytes, status: int) -> str:
+def _redact_api_key(message: str, api_key: str) -> str:
+    return message.replace(api_key, "[REDACTED]") if api_key else message
+
+
+def _safe_api_error(body: bytes, status: int, api_key: str) -> str:
     message = ""
     try:
         parsed = json.loads(body.decode("utf-8"))
@@ -209,6 +213,7 @@ def _safe_api_error(body: bytes, status: int) -> str:
             message = parsed["message"].strip()
     except (UnicodeDecodeError, json.JSONDecodeError):
         pass
+    message = _redact_api_key(message, api_key)
     suffix = f": {message[:500]}" if message else ""
     return f"Astron MaaS returned HTTP {status}{suffix}"
 
@@ -220,35 +225,47 @@ def call_maas(
     timeout: float,
 ) -> dict[str, Any]:
     """Call the non-streaming OpenAI-compatible MaaS endpoint."""
+    if "\r" in api_key or "\n" in api_key:
+        raise ScreenshotToCodeError("MaaS API key must not contain line breaks.")
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    request = Request(
-        endpoint,
-        data=body,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "iflytek-screenshot-to-code/1.0",
-        },
-        method="POST",
-    )
     try:
+        request = Request(
+            endpoint,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "iflytek-screenshot-to-code/1.0",
+            },
+            method="POST",
+        )
         with urlopen(request, timeout=timeout) as response:  # noqa: S310
             raw = response.read(MAX_RESPONSE_BYTES + 1)
             if len(raw) > MAX_RESPONSE_BYTES:
                 raise ScreenshotToCodeError("Astron MaaS response is too large.")
             status = getattr(response, "status", 200)
     except HTTPError as exc:
-        raw_error = exc.read(MAX_ERROR_BODY_BYTES)
-        raise ScreenshotToCodeError(_safe_api_error(raw_error, exc.code)) from exc
+        try:
+            raw_error = exc.read(MAX_ERROR_BODY_BYTES)
+        except (OSError, ValueError):
+            raw_error = b""
+        raise ScreenshotToCodeError(
+            _safe_api_error(raw_error, exc.code, api_key)
+        ) from None
     except URLError as exc:
-        reason = getattr(exc, "reason", "connection failed")
-        raise ScreenshotToCodeError(f"Could not reach Astron MaaS: {reason}") from exc
-    except TimeoutError as exc:
-        raise ScreenshotToCodeError("Astron MaaS request timed out.") from exc
+        reason = _redact_api_key(str(exc.reason), api_key)
+        raise ScreenshotToCodeError(f"Could not reach Astron MaaS: {reason}") from None
+    except TimeoutError:
+        raise ScreenshotToCodeError("Astron MaaS request timed out.") from None
+    except (OSError, ValueError) as exc:
+        message = _redact_api_key(str(exc), api_key)
+        raise ScreenshotToCodeError(
+            f"Could not complete Astron MaaS request: {message}"
+        ) from None
 
     if status >= 400:
-        raise ScreenshotToCodeError(_safe_api_error(raw, status))
+        raise ScreenshotToCodeError(_safe_api_error(raw, status, api_key))
     try:
         parsed = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -287,15 +304,16 @@ def normalize_code(model_output: str) -> str:
     if not stripped:
         raise ScreenshotToCodeError("Astron MaaS returned empty code.")
     fenced = re.fullmatch(
-        r"```[A-Za-z0-9_.+-]*[ \t]*\r?\n(?P<code>.*)\r?\n```",
+        r"(?P<fence>```|~~~)[A-Za-z0-9_.+-]*[ \t]*\r?\n"
+        r"(?P<code>.*)\r?\n(?P=fence)",
         stripped,
         flags=re.DOTALL,
     )
     if fenced:
         stripped = fenced.group("code").strip()
-    elif "```" in stripped:
+    if "```" in stripped or re.search(r"(?m)^[ \t]*~{3,}", stripped):
         raise ScreenshotToCodeError(
-            "Model response mixed code fences with prose; no output file was written."
+            "Model response contains extra code fences or mixed prose; no output file was written."
         )
     if not stripped or "\x00" in stripped:
         raise ScreenshotToCodeError("Astron MaaS returned invalid code.")
@@ -431,8 +449,9 @@ def main(argv: list[str] | None = None) -> int:
         code = normalize_code(response_text(response))
         validate_code(code, args.stack)
         write_code(args.output, code, args.stack, args.force)
-    except ScreenshotToCodeError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    except (ScreenshotToCodeError, OSError, ValueError) as exc:
+        message = _redact_api_key(str(exc), api_key)
+        print(f"Error: {message}", file=sys.stderr)
         return 1
 
     print(f"Wrote {args.stack} code to {args.output}")

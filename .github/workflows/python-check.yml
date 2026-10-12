@@ -4,10 +4,12 @@ on:
   pull_request:
     paths:
       - "skills/**/*.py"
+      - ".github/workflows/python-check.yml"
   push:
     branches: [main]
     paths:
       - "skills/**/*.py"
+      - ".github/workflows/python-check.yml"
   workflow_dispatch:
 
 permissions:
@@ -31,3 +33,6 @@ jobs:
         run: |
           python -m compileall -q skills
           ruff check --select=E9,F63,F7,F82 skills
+
+      - name: Test screenshot-to-code
+        run: python -m unittest discover -s skills/iflytek-screenshot-to-code/tests -v
