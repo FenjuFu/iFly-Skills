@@ -34,6 +34,8 @@ python3 scripts/screenshot_to_code.py screenshot.webp \
 
 The script validates the input's file signature, sends it as a base64 data URL, normalizes one exact Markdown code block when necessary, checks the selected single-file contract, and writes through an atomic temporary file. Multiple or nested code blocks are rejected before any output is created or replaced, including with `--force`. Existing output is preserved unless `--force` is explicit. API and transport error messages redact the configured API key before display.
 
+The n8n package does not expose this skill yet. Use this standalone CLI; n8n support requires a dedicated MaaS credential and screenshot/output-file adapter.
+
 Run offline tests from this skill directory:
 
 ```bash
